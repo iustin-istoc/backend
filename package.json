@@ -1,0 +1,16 @@
+{
+  "name": "smartcity-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Smart City platform - backend + unified device simulator (thesis)",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --env-file-if-exists=.env --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "ws": "^8.18.0"
+  }
+}
