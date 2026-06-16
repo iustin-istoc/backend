@@ -16,6 +16,17 @@ const near = (dLat, dLng) => ({ lat: CENTER.lat + dLat, lng: CENTER.lng + dLng }
 
 const STATUSES = ["disconnected", "error", "warning", "ok", "unknown"];
 
+// Converteste valoarea AQI in starea folosita de interfata
+export function statusFromAqi(value) {
+  const aqi = Number(value);
+
+  if (!Number.isFinite(aqi)) return "unknown";
+  if (aqi <= 50) return "ok";
+  if (aqi <= 150) return "warning";
+
+  return "error";
+}
+
 // ---- device definitions (5 modules) --------------------------------------
 function buildDevices() {
   const devices = [];
@@ -35,17 +46,55 @@ function buildDevices() {
   );
 
   // 2) ENVIRONMENT — air quality stations
-  const env = [
-    ["ENV-01", "Stație Centru", near(0.000, 0.001)],
-    ["ENV-02", "Stație Mărăști", near(0.006, 0.022)],
-    ["ENV-03", "Stație Mănăștur", near(-0.008, -0.024)],
-  ];
-  env.forEach(([id, name, c]) =>
-    devices.push({
-      id, module: "environment", name, lat: c.lat, lng: c.lng, status: "ok",
-      metrics: { pm25: rnd(8, 25) | 0, pm10: rnd(15, 45) | 0, no2: rnd(10, 40) | 0, temp: rnd(6, 12), humidity: rnd(50, 80) | 0, noise: rnd(45, 70) | 0 },
-    })
-  );
+  // Statiile WAQI si valorile simulate de rezerva
+const env = [
+  [
+    "ENV-01",
+    "Cluj Napoca 2",
+    near(0.000, 0.001),
+    "472192",
+  ],
+  [
+    "ENV-02",
+    "Cluj Napoca",
+    near(0.006, 0.022),
+    "471601",
+  ],
+  [
+    "ENV-03",
+    "DN1C",
+    near(-0.008, -0.024),
+    "972211",
+  ],
+];
+
+env.forEach(([id, name, c, stationId]) =>
+  devices.push({
+    id,
+    module: "environment",
+    name,
+    stationId,
+    lat: c.lat,
+    lng: c.lng,
+    status: "ok",
+    source: "simulated",
+    provider: "Simulator local",
+    external: false,
+    externalUntil: 0,
+    observedAt: null,
+    cityUrl: null,
+    attributions: [],
+    metrics: {
+      aqi: rnd(20, 55) | 0,
+      pm25: rnd(15, 50) | 0,
+      pm10: rnd(10, 45) | 0,
+      no2: rnd(8, 40) | 0,
+      temp: +rnd(6, 18).toFixed(1),
+      humidity: rnd(50, 80) | 0,
+    },
+  })
+);
+  
 
   // 3) ENERGY — smart street lights
   const lights = [
@@ -98,13 +147,81 @@ export function createSimulator() {
   const history = {};            // id -> [{t, ...metrics}]
   devices.forEach((d) => (history[d.id] = []));
 
+// Reactiveaza simularea cand datele WAQI au expirat
+function restoreEnvironmentFallback(d) {
+  d.external = false;
+  d.externalUntil = 0;
+  d.source = "simulated";
+  d.provider = "Simulator local";
+  d.observedAt = null;
+  d.updatedAt = null;
+  d.cityUrl = null;
+  d.attributions = [];
+
+  if (!Number.isFinite(Number(d.metrics.aqi))) {
+    d.metrics.aqi = rnd(20, 55) | 0;
+  }
+
+  if (!Number.isFinite(Number(d.metrics.pm25))) {
+    d.metrics.pm25 = rnd(15, 50) | 0;
+  }
+
+  if (!Number.isFinite(Number(d.metrics.pm10))) {
+    d.metrics.pm10 = rnd(10, 45) | 0;
+  }
+
+  if (!Number.isFinite(Number(d.metrics.no2))) {
+    d.metrics.no2 = rnd(8, 40) | 0;
+  }
+
+  if (!Number.isFinite(Number(d.metrics.temp))) {
+    d.metrics.temp = +rnd(6, 18).toFixed(1);
+  }
+
+  if (!Number.isFinite(Number(d.metrics.humidity))) {
+    d.metrics.humidity = rnd(50, 80) | 0;
+  }
+
+  delete d.metrics.o3;
+  delete d.metrics.co;
+  delete d.metrics.so2;
+  delete d.metrics.pressure;
+  delete d.metrics.wind;
+  delete d.metrics.dominantPollutant;
+}
+
   function tickDevice(d) {
-    if (d.external) {
+    // Traficul extern SUMO ramane neschimbat
+    if (d.external && d.module !== "environment") {
       const h0 = history[d.id];
-      h0.push({ t: new Date().toLocaleTimeString("ro-RO"), ...JSON.parse(JSON.stringify(d.metrics)) });
+
+      h0.push({
+        t: new Date().toLocaleTimeString("ro-RO"),
+        ...JSON.parse(JSON.stringify(d.metrics)),
+      });
+
       if (h0.length > 30) h0.shift();
+
       return;
     }
+
+    // Datele WAQI expira si revin automat la simulare
+    if (d.external && d.module === "environment") {
+      if (Date.now() <= Number(d.externalUntil || 0)) {
+        const h0 = history[d.id];
+
+        h0.push({
+          t: new Date().toLocaleTimeString("ro-RO"),
+          ...JSON.parse(JSON.stringify(d.metrics)),
+        });
+
+        if (h0.length > 30) h0.shift();
+
+        return;
+      }
+
+  restoreEnvironmentFallback(d);
+}
     const m = d.metrics;
     switch (d.module) {
       case "traffic":
@@ -113,15 +230,24 @@ export function createSimulator() {
         m.speed = clamp(m.speed + rnd(-4, 4), 5, 70) | 0;
         m.occupancy = clamp(m.occupancy + rnd(-8, 8), 0, 100) | 0;
         break;
+      // Simulare de rezerva pentru modulul de mediu
       case "environment":
-        m.pm25 = clamp(m.pm25 + rnd(-3, 3), 0, 90) | 0;
-        m.pm10 = clamp(m.pm10 + rnd(-4, 4), 0, 150) | 0;
-        m.no2 = clamp(m.no2 + rnd(-3, 3), 0, 120) | 0;
-        m.temp = +clamp(m.temp + rnd(-0.4, 0.4), -10, 40).toFixed(1);
-        m.humidity = clamp(m.humidity + rnd(-2, 2), 20, 100) | 0;
-        m.noise = clamp(m.noise + rnd(-3, 3), 30, 100) | 0;
-        // air quality drives status: high PM2.5 => warning/error
-        d.status = m.pm25 > 55 ? "error" : m.pm25 > 35 ? "warning" : "ok";
+        m.aqi = clamp(m.aqi + rnd(-4, 4), 0, 200) | 0;
+        m.pm25 = clamp(m.pm25 + rnd(-3, 3), 0, 200) | 0;
+        m.pm10 = clamp(m.pm10 + rnd(-4, 4), 0, 200) | 0;
+        m.no2 = clamp(m.no2 + rnd(-3, 3), 0, 200) | 0;
+        m.temp = +clamp(
+          m.temp + rnd(-0.4, 0.4),
+          -20,
+          45,
+        ).toFixed(1);
+        m.humidity = clamp(
+          m.humidity + rnd(-2, 2),
+          20,
+          100,
+        ) | 0;
+
+        d.status = statusFromAqi(m.aqi);
         break;
       case "lighting": {
         const hour = new Date().getHours();

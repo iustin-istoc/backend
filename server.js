@@ -8,15 +8,53 @@ import express from "express";
 import cors from "cors";
 import { WebSocketServer } from "ws";
 import http from "http";
-import { createSimulator } from "./simulator.js";
+import {
+  createSimulator,
+  statusFromAqi,
+} from "./simulator.js";
 import { initDb, saveReadings, getHistory, dbStats } from "./db.js";
 import crypto from "node:crypto";
 
 const PORT = 4000;
 const TICK_MS = 2000;
-
+const ENV_EXTERNAL_TTL_MS = Number(
+  process.env.ENV_EXTERNAL_TTL_MS
+  || 10 * 60 * 1000
+);
 const sim = createSimulator();
+// Converteste o valoare optionala la numar
+function optionalNumber(value) {
+  if (
+    value === null
+    || value === undefined
+    || value === ""
+  ) {
+    return null;
+  }
 
+  const number = Number(value);
+
+  return Number.isFinite(number)
+    ? number
+    : null;
+}
+
+// Curata lista surselor trimisa de WAQI
+function cleanAttributions(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter(
+      (item) =>
+        item
+        && typeof item === "object"
+        && item.name
+    )
+    .map((item) => ({
+      name: String(item.name),
+      url: item.url ? String(item.url) : "",
+    }));
+}
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -58,7 +96,114 @@ app.post("/api/ingest/traffic", (req, res) => {
   });
   res.json({ ok: true, applied });
 });
+// Primeste datele reale trimise de podul WAQI
+app.post("/api/ingest/env", (req, res) => {
+  const updates = Array.isArray(req.body)
+    ? req.body
+    : [req.body];
 
+  const errors = [];
+  let applied = 0;
+
+  updates.forEach((update, index) => {
+    if (!update || typeof update !== "object") {
+      errors.push({
+        index,
+        error: "invalid payload",
+      });
+      return;
+    }
+
+    const device = sim.getDevices().find(
+      (item) =>
+        item.id === update.id
+        && item.module === "environment"
+    );
+
+    if (!device) {
+      errors.push({
+        index,
+        id: update.id,
+        error: "environment device not found",
+      });
+      return;
+    }
+
+    const aqi = optionalNumber(update.aqi);
+    const lat = optionalNumber(update.lat);
+    const lng = optionalNumber(update.lng);
+
+    if (aqi === null || lat === null || lng === null) {
+      errors.push({
+        index,
+        id: update.id,
+        error: "aqi, lat and lng must be numeric",
+      });
+      return;
+    }
+
+    device.name = update.name
+      ? String(update.name)
+      : device.name;
+
+    device.stationId = update.stationId
+      ? String(update.stationId)
+      : device.stationId;
+
+    device.lat = lat;
+    device.lng = lng;
+    device.status = statusFromAqi(aqi);
+    device.source = "external";
+    device.provider = "World Air Quality Index Project";
+    device.external = true;
+    device.externalUntil =
+      Date.now() + ENV_EXTERNAL_TTL_MS;
+
+    device.observedAt = update.observedAt
+      ? String(update.observedAt)
+      : null;
+
+    device.updatedAt = new Date().toISOString();
+
+    device.cityUrl = update.cityUrl
+      ? String(update.cityUrl)
+      : null;
+
+    device.attributions = cleanAttributions(
+      update.attributions
+    );
+
+    device.metrics.aqi = aqi;
+    device.metrics.pm25 = optionalNumber(update.pm25);
+    device.metrics.pm10 = optionalNumber(update.pm10);
+    device.metrics.no2 = optionalNumber(update.no2);
+    device.metrics.o3 = optionalNumber(update.o3);
+    device.metrics.co = optionalNumber(update.co);
+    device.metrics.so2 = optionalNumber(update.so2);
+    device.metrics.temp = optionalNumber(update.temp);
+    device.metrics.humidity =
+      optionalNumber(update.humidity);
+    device.metrics.pressure =
+      optionalNumber(update.pressure);
+    device.metrics.wind =
+      optionalNumber(update.wind);
+
+    device.metrics.dominantPollutant =
+      update.dominantPollutant
+        ? String(update.dominantPollutant)
+        : null;
+
+    applied += 1;
+  });
+
+  res
+    .status(applied > 0 ? 202 : 400)
+    .json({
+      ok: applied > 0,
+      applied,
+      errors,
+    });
+});
 // --- autentificare simplă (nivel demonstrație) ---
 const ADMIN_USER = process.env.ADMIN_USER || "admin";
 const ADMIN_PASS = process.env.ADMIN_PASS || "admin";
@@ -93,7 +238,14 @@ function startHeartbeat() {
     sim.tick();
     const devices = sim.getDevices();
     try {
-      await saveReadings(devices); // persist history to PostgreSQL
+      const persistentDevices = devices.filter(
+        (device) =>
+         !(
+            device.module === "environment"
+            && device.source === "external"
+          )
+        );
+    await saveReadings(persistentDevices);
     } catch (err) {
       console.error("  ! DB write failed:", err.message);
     }
