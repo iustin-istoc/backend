@@ -45,10 +45,62 @@ function buildDevices() {
     })
   );
 
-  // 2) ENVIRONMENT — stații de calitate a aerului
-  // Stațiile NU mai sunt hardcodate: podul WAQI (aqi_bridge.py) descoperă automat
-  // TOATE stațiile din Cluj de pe aqicn.org și le creează prin /api/ingest/env.
-  // Vezi createSimulator().ensureEnvDevice() pentru crearea la rulare.
+  // 2) ENVIRONMENT — stații de calitate a aerului (toate stațiile WAQI din Cluj)
+  // [uid WAQI, nume]. id-ul dispozitivului = ENV-<uid>, exact cheia trimisă de podul
+  // aqi_bridge.py, așa că valorile REALE și coordonatele corecte le actualizează pe loc
+  // când podul are conexiune. Coordonatele de start sunt distribuite în jurul centrului
+  // (placeholder) până la prima măsurare reală. Stații noi se adaugă automat (ensureEnvDevice).
+  const envStations = [
+    ["479848", "Sânnicoară"],
+    ["472192", "Cluj Napoca 2"],
+    ["471601", "Cluj Napoca"],
+    ["502057", "Bd. 21 Decembrie 1989"],
+    ["484903", "Strada Câmpului"],
+    ["523171", "Strada Fântânele"],
+    ["205393", "Calea Turzii"],
+    ["598894", "Strada 1 Mai"],
+    ["235588", "Strada Bună Ziua"],
+    ["532648", "Aleea Bâlea"],
+    ["527899", "Strada George Barițiu"],
+    ["760486", "Strada Constructorilor"],
+    ["233335", "Aleea Budai Nagy Antal"],
+    ["193945", "Antonio Gaudi S1"],
+    ["527887", "Strada George Coșbuc"],
+    ["532642", "Strada Aviator Bădescu"],
+    ["177814", "Strada Antonio Gaudi"],
+    ["518284", "Strada Bună Ziua (2)"],
+    ["244603", "Strada Regele Ferdinand"],
+    ["205399", "Strada Frunzișului"],
+  ];
+  envStations.forEach(([uid, name], i) => {
+    // distribuie pe inele concentrice ca să nu se suprapună pe hartă
+    const ang = (i / envStations.length) * Math.PI * 2;
+    const r = 0.010 + (i % 3) * 0.006;
+    devices.push({
+      id: `ENV-${uid}`,
+      module: "environment",
+      name,
+      stationId: uid,
+      lat: CENTER.lat + Math.sin(ang) * r,
+      lng: CENTER.lng + Math.cos(ang) * r,
+      status: "ok",
+      source: "simulated",
+      provider: "Simulator local",
+      external: false,
+      externalUntil: 0,
+      observedAt: null,
+      cityUrl: `https://aqicn.org/station/@${uid}/ro/`,
+      attributions: [],
+      metrics: {
+        aqi: rnd(20, 60) | 0,
+        pm25: rnd(15, 50) | 0,
+        pm10: rnd(10, 45) | 0,
+        no2: rnd(8, 40) | 0,
+        temp: +rnd(6, 18).toFixed(1),
+        humidity: rnd(50, 80) | 0,
+      },
+    });
+  });
 
 
   // 3) ENERGY — corpuri de iluminat inteligent (model tip CMS / LoRaWAN)
@@ -349,6 +401,28 @@ function restoreEnvironmentFallback(d) {
         cityUrl: null,
         attributions: [],
         metrics: { aqi: null, pm25: null, pm10: null, no2: null, temp: null, humidity: null },
+      };
+      devices.push(device);
+      history[id] = [];
+      return device;
+    },
+    // Creează (dacă lipsește) un vehicul de transport public (CTP/Tranzy).
+    ensureTransitDevice: (id) => {
+      let device = devices.find((d) => d.id === id);
+      if (device) return device;
+      device = {
+        id,
+        module: "transit",
+        name: id,
+        lat: CENTER.lat,
+        lng: CENTER.lng,
+        status: "ok",
+        source: "external",
+        provider: "CTP Cluj-Napoca (Tranzy OpenData)",
+        external: true,
+        observedAt: null,
+        updatedAt: null,
+        metrics: { speed: 0, bearing: 0, route: "", label: "", vehicleType: "bus" },
       };
       devices.push(device);
       history[id] = [];

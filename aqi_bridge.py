@@ -28,6 +28,33 @@ CLUJ_BOUNDS = os.getenv(
     "46.68,23.46,46.86,23.74",
 ).strip()
 
+# Stații cunoscute din Cluj (de pe aqicn.org). API-ul map/bounds returnează doar
+# stația oficială agregată, deci cerem explicit și senzorii individuali, după uid.
+# Lista se completează automat cu orice apare în plus în map/bounds.
+KNOWN_CLUJ_STATIONS = {
+    "479848": "Sânnicoară",
+    "472192": "Cluj Napoca 2",
+    "471601": "Cluj Napoca",
+    "7659": "Str. Dâmboviței",
+    "502057": "Bd. 21 Decembrie 1989",
+    "484903": "Strada Câmpului",
+    "523171": "Strada Fântânele",
+    "205393": "Calea Turzii",
+    "598894": "Strada 1 Mai",
+    "235588": "Strada Bună Ziua",
+    "532648": "Aleea Bâlea",
+    "527899": "Strada George Barițiu",
+    "760486": "Strada Constructorilor",
+    "233335": "Aleea Budai Nagy Antal",
+    "193945": "Antonio Gaudi S1",
+    "527887": "Strada George Coșbuc",
+    "532642": "Strada Aviator Bădescu",
+    "177814": "Strada Antonio Gaudi",
+    "518284": "Strada Bună Ziua (2)",
+    "244603": "Strada Regele Ferdinand",
+    "205399": "Strada Frunzișului",
+}
+
 # Pe retele cu inspectie SSL (facultate/firma) verificarea certificatului poate
 # pica. Pune WAQI_VERIFY_SSL=0 in .env ca sa o dezactivezi (doar pentru demo).
 VERIFY_SSL = os.getenv("WAQI_VERIFY_SSL", "1").strip() != "0"
@@ -119,37 +146,55 @@ def clean_attributions(value: Any) -> list[dict[str, str]]:
     return result
 
 
-def discover_stations() -> list[dict[str, Any]]:
-    # Descopera toate statiile WAQI din cadrul geografic Cluj.
-    endpoint = "https://api.waqi.info/map/bounds/"
-
-    result = get_json(endpoint, {"token": WAQI_API_TOKEN, "latlng": CLUJ_BOUNDS})
-    if result is None:
-        return []
-
-    if result.get("status") != "ok":
-        print(f"[WAQI] Descoperirea nu a returnat date (status={result.get('status')}).")
-        return []
-
-    stations: list[dict[str, Any]] = []
-    seen: set[Any] = set()
-
-    for item in result.get("data", []):
+def _add_from_data(stations: dict[str, str], data: Any) -> int:
+    # Adauga uid-urile dintr-un raspuns WAQI (bounds sau search) in dictionar.
+    added = 0
+    if not isinstance(data, list):
+        return 0
+    for item in data:
         if not isinstance(item, dict):
             continue
-
         uid = item.get("uid")
-        if uid is None or uid in seen:
+        if uid is None:
             continue
-        seen.add(uid)
-
+        key = str(uid)
         station = item.get("station") or {}
-        name = str(station.get("name") or f"Statie {uid}")
+        name = str(station.get("name") or stations.get(key) or f"Statie {uid}")
+        if key not in stations:
+            added += 1
+        stations[key] = stations.get(key) or name
+    return added
 
-        stations.append({"uid": uid, "fallback_name": name})
 
-    print(f"[WAQI] Statii descoperite in zona Cluj: {len(stations)}")
-    return stations
+def discover_stations() -> list[dict[str, Any]]:
+    # Descoperire automata folosind TOKENUL prin trei surse, reunite dupa uid:
+    #   1) cautare dupa nume  (/v2/search/?keyword=...)
+    #   2) statii din cadrul geografic Cluj  (/map/bounds/)
+    #   3) lista cunoscuta din pagina aqicn (fallback, mereu inclusa)
+    stations: dict[str, str] = dict(KNOWN_CLUJ_STATIONS)
+
+    # 1) cautare dupa cuvant cheie
+    for keyword in ("cluj", "cluj-napoca"):
+        result = get_json(
+            "https://api.waqi.info/v2/search/",
+            {"token": WAQI_API_TOKEN, "keyword": keyword},
+        )
+        if result and result.get("status") == "ok":
+            n = _add_from_data(stations, result.get("data"))
+            print(f"[WAQI] Cautare '{keyword}': +{n} statii noi.")
+
+    # 2) cadru geografic
+    result = get_json(
+        "https://api.waqi.info/map/bounds/",
+        {"token": WAQI_API_TOKEN, "latlng": CLUJ_BOUNDS},
+    )
+    if result and result.get("status") == "ok":
+        n = _add_from_data(stations, result.get("data"))
+        print(f"[WAQI] map/bounds: +{n} statii noi.")
+
+    out = [{"uid": uid, "fallback_name": name} for uid, name in stations.items()]
+    print(f"[WAQI] Statii Cluj de interogat (total): {len(out)}")
+    return out
 
 
 def fetch_station(station: dict[str, Any]) -> dict[str, Any] | None:

@@ -31,6 +31,11 @@ const CLUJ_LON = 23.591;
 const SUN_URL = process.env.SUN_URL
   || `https://api.open-meteo.com/v1/forecast?latitude=${CLUJ_LAT}&longitude=${CLUJ_LON}&daily=sunrise,sunset&timezone=Europe%2FBucharest&forecast_days=1`;
 const SUN_POLL_MS = Number(process.env.SUN_POLL_MS || 6 * 60 * 60 * 1000);
+// Transport public live — CTP Cluj prin Tranzy OpenData (necesită cheie gratuită).
+const TRANZY_BASE = process.env.TRANZY_BASE || "https://api.tranzy.ai/v1/opendata";
+const TRANZY_KEY = (process.env.TRANZY_API_KEY || "").trim();
+const TRANZY_AGENCY = (process.env.TRANZY_AGENCY_ID || "").trim(); // opțional; altfel auto-detect
+const TRANSIT_POLL_MS = Number(process.env.TRANSIT_POLL_MS || 10000);
 const sim = createSimulator();
 // Converteste o valoare optionala la numar
 function optionalNumber(value) {
@@ -345,6 +350,92 @@ async function pollSunTimes() {
   }
 }
 
+// ---------------------------------------------------------------------------
+//  Poller transport public — CTP Cluj prin Tranzy OpenData (GTFS-realtime).
+//  Auto-detectează agency_id pentru Cluj, apoi citește pozițiile live ale
+//  vehiculelor și le afișează ca dispozitive „transit" pe hartă.
+// ---------------------------------------------------------------------------
+let transitAgencyId = TRANZY_AGENCY || null;
+let transitRouteNames = null;
+
+async function tranzyGet(path, agencyId) {
+  const headers = { Accept: "application/json", "X-API-KEY": TRANZY_KEY };
+  if (agencyId) headers["X-Agency-Id"] = String(agencyId);
+  const res = await fetch(`${TRANZY_BASE}${path}`, { headers, signal: AbortSignal.timeout(9000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function resolveAgency() {
+  if (transitAgencyId) return transitAgencyId;
+  const list = await tranzyGet("/agency");
+  if (Array.isArray(list)) {
+    const cluj = list.find((a) =>
+      String(a.agency_name || a.name || "").toLowerCase().includes("cluj"));
+    if (cluj) transitAgencyId = String(cluj.agency_id ?? cluj.id);
+  }
+  if (transitAgencyId) console.log(`  Tranzy: agency_id Cluj = ${transitAgencyId}`);
+  return transitAgencyId;
+}
+
+async function loadRouteNames(agencyId) {
+  if (transitRouteNames) return transitRouteNames;
+  try {
+    const routes = await tranzyGet("/routes", agencyId);
+    transitRouteNames = {};
+    (Array.isArray(routes) ? routes : []).forEach((r) => {
+      transitRouteNames[String(r.route_id)] =
+        r.route_short_name || r.route_long_name || String(r.route_id);
+    });
+  } catch {
+    transitRouteNames = {};
+  }
+  return transitRouteNames;
+}
+
+async function pollTransit() {
+  if (!TRANZY_KEY) return; // fără cheie -> modulul rămâne gol (fallback grațios)
+  try {
+    const agencyId = await resolveAgency();
+    if (!agencyId) {
+      console.error("  ! Tranzy: nu am găsit agency_id pentru Cluj.");
+      return;
+    }
+    const routeNames = await loadRouteNames(agencyId);
+    const vehicles = await tranzyGet("/vehicles", agencyId);
+    if (!Array.isArray(vehicles)) return;
+
+    let applied = 0;
+    vehicles.forEach((v) => {
+      const lat = Number(v.latitude ?? v.lat);
+      const lng = Number(v.longitude ?? v.lng ?? v.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      const vid = String(v.id ?? v.label ?? v.vehicle_id ?? "");
+      if (!vid) return;
+
+      const route = routeNames[String(v.route_id)]
+        || (v.route_id != null ? String(v.route_id) : "");
+      const d = sim.ensureTransitDevice(`CTP-${vid}`);
+      d.lat = lat;
+      d.lng = lng;
+      d.name = (v.label ? String(v.label) : `Vehicul ${vid}`) + (route ? ` · ${route}` : "");
+      d.status = "ok";
+      d.source = "external";
+      d.observedAt = v.timestamp ? String(v.timestamp) : new Date().toISOString();
+      d.updatedAt = new Date().toISOString();
+      d.metrics.speed = Math.round(Number(v.speed) || 0);
+      d.metrics.bearing = Math.round(Number(v.bearing) || 0);
+      d.metrics.route = route;
+      d.metrics.label = v.label ? String(v.label) : vid;
+      d.metrics.vehicleType = Number(v.vehicle_type) === 0 ? "tram" : "bus";
+      applied += 1;
+    });
+    if (applied) console.log(`  Transport public live: ${applied} vehicule CTP (Tranzy).`);
+  } catch (err) {
+    console.error("  ! Tranzy indisponibil:", err.message);
+  }
+}
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
@@ -365,6 +456,7 @@ function startHeartbeat() {
             device.module === "environment"
             && device.source === "external"
           )
+         && device.module !== "transit"   // vehiculele CTP sunt dinamice, nu se persistă
         );
     await saveReadings(persistentDevices);
     } catch (err) {
@@ -394,6 +486,14 @@ setInterval(pollParking, PARK_POLL_MS);
 // preia orele solare imediat, apoi periodic (se schimbă lent)
 pollSunTimes();
 setInterval(pollSunTimes, SUN_POLL_MS);
+
+// transport public live (doar dacă există cheia Tranzy în .env)
+if (TRANZY_KEY) {
+  pollTransit();
+  setInterval(pollTransit, TRANSIT_POLL_MS);
+} else {
+  console.log("  Transport public: setează TRANZY_API_KEY în .env pentru date live CTP.");
+}
 
 server.listen(PORT, () => {
   console.log(`\n  Smart City backend running`);
