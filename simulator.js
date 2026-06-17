@@ -45,95 +45,67 @@ function buildDevices() {
     })
   );
 
-  // 2) ENVIRONMENT — air quality stations
-  // Statiile WAQI si valorile simulate de rezerva
-const env = [
-  [
-    "ENV-01",
-    "Cluj Napoca 2",
-    near(0.000, 0.001),
-    "472192",
-  ],
-  [
-    "ENV-02",
-    "Cluj Napoca",
-    near(0.006, 0.022),
-    "471601",
-  ],
-  [
-    "ENV-03",
-    "DN1C",
-    near(-0.008, -0.024),
-    "972211",
-  ],
-];
+  // 2) ENVIRONMENT — stații de calitate a aerului
+  // Stațiile NU mai sunt hardcodate: podul WAQI (aqi_bridge.py) descoperă automat
+  // TOATE stațiile din Cluj de pe aqicn.org și le creează prin /api/ingest/env.
+  // Vezi createSimulator().ensureEnvDevice() pentru crearea la rulare.
 
-env.forEach(([id, name, c, stationId]) =>
-  devices.push({
-    id,
-    module: "environment",
-    name,
-    stationId,
-    lat: c.lat,
-    lng: c.lng,
-    status: "ok",
-    source: "simulated",
-    provider: "Simulator local",
-    external: false,
-    externalUntil: 0,
-    observedAt: null,
-    cityUrl: null,
-    attributions: [],
-    metrics: {
-      aqi: rnd(20, 55) | 0,
-      pm25: rnd(15, 50) | 0,
-      pm10: rnd(10, 45) | 0,
-      no2: rnd(8, 40) | 0,
-      temp: +rnd(6, 18).toFixed(1),
-      humidity: rnd(50, 80) | 0,
-    },
-  })
-);
-  
 
-  // 3) ENERGY — smart street lights
+  // 3) ENERGY — corpuri de iluminat inteligent (model tip CMS / LoRaWAN)
+  // [id, nume, dLat, dLng, ratedW (putere nominală LED), segment (controller)]
   const lights = [
-    ["LMP-01", "Bd. Eroilor", near(0.001, 0.002)],
-    ["LMP-02", "Str. Memorandumului", near(0.002, -0.004)],
-    ["LMP-03", "Calea Florești", near(0.001, -0.030)],
-    ["LMP-04", "Parcul Central", near(-0.002, -0.010)],
+    ["LMP-01", "Bd. Eroilor",         0.001,  0.002,  90,  "SC-Centru"],
+    ["LMP-02", "Str. Memorandumului", 0.002, -0.004,  75,  "SC-Centru"],
+    ["LMP-03", "Calea Florești",      0.001, -0.030, 120,  "SC-Vest"],
+    ["LMP-04", "Parcul Central",     -0.002, -0.010,  60,  "SC-Centru"],
+    ["LMP-05", "Bd. 21 Decembrie",    0.005,  0.007, 100,  "SC-Est"],
+    ["LMP-06", "Str. Horea",          0.005, -0.002,  90,  "SC-Est"],
   ];
-  lights.forEach(([id, name, c]) =>
+  lights.forEach(([id, name, dLat, dLng, ratedW, segment]) => {
+    const c = near(dLat, dLng);
     devices.push({
       id, module: "lighting", name, lat: c.lat, lng: c.lng, status: "ok",
-      metrics: { on: true, dim: 80, powerW: rnd(60, 120) | 0 },
-    })
-  );
+      source: "simulated", segment, node: "Zhaga D4i", protocol: "LoRaWAN",
+      fault: null, astro: null,
+      metrics: { on: true, dim: 80, ratedW, powerW: Math.round(ratedW * 0.8) },
+    });
+  });
 
   // 4) SAFETY — CCTV cameras
+  // streamUrl (optional): pune o sursă video reală în locul feed-ului simulat.
+  // CAM-03 folosește webcam-ul live din Piața Avram Iancu (YouTube, webcamromania.ro).
   const cams = [
-    ["CAM-01", "Piața Unirii", near(0.000, 0.000)],
-    ["CAM-02", "Gara Cluj-Napoca", near(0.014, -0.023)],
-    ["CAM-03", "Piața Avram Iancu", near(0.001, 0.003)],
-    ["CAM-04", "Cluj Arena", near(-0.003, -0.016)],
-    ["CAM-05", "Iulius Mall", near(0.001, 0.034)],
+    ["CAM-03", "Piața Avram Iancu", near(0.001, 0.003), "https://www.youtube.com/embed/EfAO0iXOeiE"],
   ];
-  cams.forEach(([id, name, c]) =>
+  cams.forEach(([id, name, c, streamUrl]) =>
     devices.push({
       id, module: "video", name, lat: c.lat, lng: c.lng, status: "ok",
+      source: streamUrl ? "external" : "simulated",
+      streamUrl: streamUrl || null,
       metrics: { fps: 25, online: true },
     })
   );
 
-  // 5) SERVICES — parking lots
+  // 5) SERVICES — parcări cu barieră (date reale, Primăria Cluj-Napoca / OpenData)
+  // parkingKey trebuie să fie EXACT „denumire" din sitpark.json (cheia de potrivire).
+  // Coordonate + capacități preluate din feed-ul oficial.
   const parks = [
-    ["PRK-01", "Parcare Centru (Unirii)", near(0.001, -0.001), 150],
-    ["PRK-02", "Parcare Iulius Mall", near(0.000, 0.033), 400],
-    ["PRK-03", "Parcare Spital Județean", near(-0.004, 0.008), 90],
+    ["PRK-01", "Parking Moților",         "Parking Motilor",          46.767933, 23.584979, 382],
+    ["PRK-02", "Parcare Unirii",          "Parcare Unirii",           46.770511, 23.590050, 96],
+    ["PRK-03", "Parcare Mihai Viteazul",  "Parcare Mihai Viteazul",   46.774168, 23.590393, 73],
+    ["PRK-04", "Parcare Cipariu",         "Parcare Cipariu",          46.768347, 23.599221, 100],
+    ["PRK-05", "Parking Sala Polivalentă","Parking Sala Polivalenta", 46.767020, 23.571684, 440],
+    ["PRK-06", "Parking Multiplex Leul",  "Parking Multiplex Leul",   46.774915, 23.593615, 210],
+    ["PRK-07", "Parking Cluj Arena",      "Parking Cluj Arena",       46.768876, 23.571106, 303],
+    ["PRK-08", "Parking Hașdeu",          "Parking Hasdeu",           46.762130, 23.577944, 37],
+    ["PRK-09", "Park & Ride",             "Park & Ride",              46.781571, 23.681115, 889],
   ];
-  parks.forEach(([id, name, c, cap]) =>
+  parks.forEach(([id, name, parkingKey, lat, lng, cap]) =>
     devices.push({
-      id, module: "parking", name, lat: c.lat, lng: c.lng, status: "ok",
+      id, module: "parking", name, parkingKey, lat, lng, status: "ok",
+      source: "simulated", provider: "Simulator local", liveData: false,
+      observedAt: null, updatedAt: null,
+      // valori inițiale simulate până la prima preluare din feed
       metrics: { capacity: cap, occupied: (cap * rnd(0.3, 0.8)) | 0, free: 0 },
     })
   );
@@ -146,6 +118,9 @@ export function createSimulator() {
   const devices = buildDevices();
   const history = {};            // id -> [{t, ...metrics}]
   devices.forEach((d) => (history[d.id] = []));
+
+  // Configurare partajată: orele reale de apus/răsărit (Open-Meteo) pentru iluminat.
+  const config = { sun: null, sunProvider: null };
 
 // Reactiveaza simularea cand datele WAQI au expirat
 function restoreEnvironmentFallback(d) {
@@ -250,13 +225,52 @@ function restoreEnvironmentFallback(d) {
         d.status = statusFromAqi(m.aqi);
         break;
       case "lighting": {
-        const hour = new Date().getHours();
-        m.on = hour >= 19 || hour < 7;
-        m.dim = m.on ? clamp(m.dim + rnd(-5, 5), 30, 100) | 0 : 0;
-        m.powerW = m.on ? (m.dim * rnd(1.0, 1.4)) | 0 : 0;
+        const now = new Date();
+        const h = now.getHours() + now.getMinutes() / 60;
+
+        // Layer 1 — aprindere/stingere pe baza orelor REALE de apus/răsărit (Open-Meteo).
+        // Fallback la orar fix 19:00–07:00 dacă nu avem încă date solare.
+        const sun = config.sun;
+        const on = sun && sun.sunrise && sun.sunset
+          ? (now < sun.sunrise || now >= sun.sunset)
+          : (h >= 19 || h < 7);
+
+        // Layer 2 — profil de dimming conform EN 13201 (reducere la miezul nopții) ...
+        let base;
+        if (!on) base = 0;
+        else if (h < 5) base = 50;        // noapte adâncă
+        else if (h < 7) base = 70;        // spre răsărit
+        else if (h >= 22) base = 80;      // seara târziu
+        else base = 100;                  // amurg / prima parte a serii
+
+        // ... + dimming adaptiv la trafic (Traffic Adaptive Installation).
+        let occSum = 0, occN = 0;
+        devices.forEach((t) => {
+          if (t.module === "traffic") { occSum += t.metrics.occupancy || 0; occN += 1; }
+        });
+        const avgOcc = occN ? occSum / occN : 0;
+        const dim = on ? Math.min(100, Math.round(base + avgOcc * 0.25)) : 0;
+
+        m.on = on;
+        m.dim = dim;
+        // Layer 3 — consum determinist din puterea nominală LED și nivelul de dimming.
+        m.powerW = on ? Math.round((m.ratedW || 90) * dim / 100) : 0;
+        m.occAdaptive = Math.round(avgOcc);
+
+        // expune orele solare pentru frontend (tab Schedule)
+        d.astro = sun
+          ? { sunrise: sun.sunrise.toISOString(), sunset: sun.sunset.toISOString(), provider: config.sunProvider }
+          : null;
         break;
       }
       case "video":
+        // Camerele cu sursă reală (streamUrl) rămân mereu online, fără variații simulate.
+        if (d.streamUrl) {
+          d.status = "ok";
+          m.online = true;
+          m.fps = 25;
+          break;
+        }
         m.online = d.status !== "error" && d.status !== "disconnected";
         m.fps = m.online ? (24 + (Math.random() * 4 - 2)) | 0 : 0;
         break;
@@ -267,10 +281,27 @@ function restoreEnvironmentFallback(d) {
         break;
     }
 
-    // random faults for non-env/non-parking modules (those compute their own)
-    if (["traffic", "lighting", "video"].includes(d.module) && Math.random() < 0.04) {
+    // Defecte aleatorii pentru modulele non-mediu/non-parcare (restul își calculează singure starea).
+    // Camerele cu sursă reală (streamUrl) nu primesc defecte aleatorii.
+    if (["traffic", "lighting", "video"].includes(d.module) && !d.streamUrl && Math.random() < 0.04) {
       const r = Math.random();
       d.status = r < 0.7 ? "ok" : r < 0.85 ? "warning" : r < 0.95 ? "error" : "disconnected";
+    }
+
+    // Layer 4 — semantica defectelor pentru iluminat (stări tipice unui CMS real)
+    if (d.module === "lighting") {
+      if (d.status === "error") {
+        d.fault = "Lampă defectă (bec/driver ars)";
+        d.metrics.on = false;
+        d.metrics.powerW = 0;
+        d.metrics.dim = 0;
+      } else if (d.status === "disconnected") {
+        d.fault = "Pierdere comunicație nod (LoRaWAN)";
+      } else if (d.status === "warning") {
+        d.fault = "Supraconsum / driver degradat";
+      } else {
+        d.fault = null;
+      }
     }
 
     // record history (keep last 30 points)
@@ -290,5 +321,38 @@ function restoreEnvironmentFallback(d) {
     getDevices: () => devices,
     getHistory: (id) => history[id] || [],
     statuses: STATUSES,
+    // setează orele reale de apus/răsărit (apelat de poller-ul Open-Meteo din server)
+    setSunTimes: (sunrise, sunset, provider) => {
+      config.sun = { sunrise, sunset };
+      config.sunProvider = provider || "Open-Meteo";
+    },
+    getConfig: () => config,
+    // Creează (dacă lipsește) un dispozitiv de mediu pentru o stație WAQI descoperită
+    // dinamic de pod. Inițializează și istoricul, ca tick-ul să nu eșueze.
+    ensureEnvDevice: (id) => {
+      let device = devices.find((d) => d.id === id);
+      if (device) return device;
+      device = {
+        id,
+        module: "environment",
+        name: id,
+        stationId: null,
+        lat: CENTER.lat,
+        lng: CENTER.lng,
+        status: "unknown",
+        source: "external",
+        provider: "World Air Quality Index Project",
+        external: true,
+        externalUntil: 0,
+        observedAt: null,
+        updatedAt: null,
+        cityUrl: null,
+        attributions: [],
+        metrics: { aqi: null, pm25: null, pm10: null, no2: null, temp: null, humidity: null },
+      };
+      devices.push(device);
+      history[id] = [];
+      return device;
+    },
   };
 }

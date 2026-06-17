@@ -21,6 +21,16 @@ const ENV_EXTERNAL_TTL_MS = Number(
   process.env.ENV_EXTERNAL_TTL_MS
   || 10 * 60 * 1000
 );
+// Feed-ul oficial de parcări cu barieră (Primăria Cluj-Napoca / OpenData)
+const PARK_URL = process.env.PARK_URL
+  || "http://data.e-primariaclujnapoca.ro/sitpark.json";
+const PARK_POLL_MS = Number(process.env.PARK_POLL_MS || 30_000);
+// Ore reale de apus/răsărit pentru iluminat (Open-Meteo, gratuit, fără cheie)
+const CLUJ_LAT = 46.770;
+const CLUJ_LON = 23.591;
+const SUN_URL = process.env.SUN_URL
+  || `https://api.open-meteo.com/v1/forecast?latitude=${CLUJ_LAT}&longitude=${CLUJ_LON}&daily=sunrise,sunset&timezone=Europe%2FBucharest&forecast_days=1`;
+const SUN_POLL_MS = Number(process.env.SUN_POLL_MS || 6 * 60 * 60 * 1000);
 const sim = createSimulator();
 // Converteste o valoare optionala la numar
 function optionalNumber(value) {
@@ -114,20 +124,19 @@ app.post("/api/ingest/env", (req, res) => {
       return;
     }
 
-    const device = sim.getDevices().find(
+    if (!update.id) {
+      errors.push({ index, error: "id lipsă" });
+      return;
+    }
+
+    const existing = sim.getDevices().find(
       (item) =>
         item.id === update.id
         && item.module === "environment"
     );
 
-    if (!device) {
-      errors.push({
-        index,
-        id: update.id,
-        error: "environment device not found",
-      });
-      return;
-    }
+    // Stațiile descoperite dinamic de pod sunt create automat la prima ingestie.
+    const device = existing || sim.ensureEnvDevice(update.id);
 
     const aqi = optionalNumber(update.aqi);
     const lat = optionalNumber(update.lat);
@@ -204,6 +213,30 @@ app.post("/api/ingest/env", (req, res) => {
       errors,
     });
 });
+// Ingest pentru iluminat: un CMS real (TALQ / pod LoRaWAN) trimite aici starea corpurilor.
+app.post("/api/ingest/lighting", (req, res) => {
+  const updates = Array.isArray(req.body) ? req.body : [];
+  let applied = 0;
+  updates.forEach((u) => {
+    const d = sim.getDevices().find((x) => x.id === u.id && x.module === "lighting");
+    if (!d) return;
+    d.external = true;                 // oprește simularea pentru acest corp
+    d.source = "external";
+    d.provider = "CMS iluminat (TALQ / LoRaWAN)";
+    if (u.on != null) d.metrics.on = !!u.on;
+    if (u.dim != null) d.metrics.dim = Number(u.dim);
+    if (u.powerW != null) d.metrics.powerW = Number(u.powerW);
+    if (u.ratedW != null) d.metrics.ratedW = Number(u.ratedW);
+    if (u.status) d.status = String(u.status);
+    if (u.segment) d.segment = String(u.segment);
+    d.fault = u.fault ? String(u.fault) : null;
+    d.updatedAt = new Date().toISOString();
+    if (u.lat != null && u.lng != null) { d.lat = u.lat; d.lng = u.lng; }
+    applied += 1;
+  });
+  res.json({ ok: true, applied });
+});
+
 // --- autentificare simplă (nivel demonstrație) ---
 const ADMIN_USER = process.env.ADMIN_USER || "admin";
 const ADMIN_PASS = process.env.ADMIN_PASS || "admin";
@@ -223,6 +256,94 @@ app.post("/api/logout", (req, res) => {
   sessions.delete((req.body || {}).token);
   res.json({ ok: true });
 });
+
+// ---------------------------------------------------------------------------
+//  Poller pentru parcările cu barieră — preia locurile libere LIVE din
+//  feed-ul oficial (sitpark.json) și actualizează dispozitivele „parking".
+//  Potrivirea se face după `parkingKey` === `denumire` din feed.
+// ---------------------------------------------------------------------------
+async function pollParking() {
+  try {
+    const res = await fetch(PARK_URL, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!Array.isArray(data)) throw new Error("format neașteptat");
+
+    const byKey = new Map(
+      data.map((p) => [String(p.denumire || "").trim(), p])
+    );
+
+    let applied = 0;
+    sim.getDevices().forEach((d) => {
+      if (d.module !== "parking" || !d.parkingKey) return;
+      const p = byKey.get(d.parkingKey);
+      if (!p) return;
+
+      const cap = Number(p.capacitate) || d.metrics.capacity;
+      const freeRaw = p.locuri_libere;
+      const free =
+        freeRaw === "NA" || freeRaw === null || freeRaw === undefined
+          ? null
+          : Number(freeRaw);
+
+      d.external = true;                 // oprește simularea pentru acest dispozitiv
+      d.source = "external";
+      d.provider = "Primăria Cluj-Napoca (OpenData)";
+      d.observedAt = p?.detalii?.actualizare || null;
+      d.updatedAt = new Date().toISOString();
+      d.metrics.capacity = cap;
+
+      if (free === null || !Number.isFinite(free)) {
+        // senzor fără date live (în feed apare „NA")
+        d.metrics.free = null;
+        d.metrics.occupied = null;
+        d.liveData = false;
+        d.status = "unknown";
+      } else {
+        const clampedFree = Math.max(0, Math.min(cap, free | 0));
+        d.metrics.free = clampedFree;
+        d.metrics.occupied = cap - clampedFree;
+        d.liveData = true;
+        const pct = cap > 0 ? (d.metrics.occupied / cap) * 100 : 0;
+        d.status = clampedFree === 0 ? "error" : pct >= 90 ? "warning" : "ok";
+        // flux intrări/ieșiri (ultimele 15 min) din feed
+        d.metrics.in15 = Number(p?.detalii?.in15min) || 0;
+        d.metrics.out15 = Number(p?.detalii?.out15min) || 0;
+      }
+      applied += 1;
+    });
+
+    if (applied) {
+      console.log(`  Parking live: ${applied} parcări actualizate din sitpark.json.`);
+    }
+  } catch (err) {
+    console.error("  ! Feed parcări indisponibil (rămân valori simulate):", err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Poller pentru orele de apus/răsărit (Open-Meteo) — alimentează iluminatul
+//  cu un „ceas astronomic" real, exact cum funcționează un CMS de iluminat.
+// ---------------------------------------------------------------------------
+async function pollSunTimes() {
+  try {
+    const res = await fetch(SUN_URL, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const j = await res.json();
+    const sr = j?.daily?.sunrise?.[0];
+    const ss = j?.daily?.sunset?.[0];
+    if (!sr || !ss) throw new Error("răspuns fără sunrise/sunset");
+    const sunrise = new Date(sr);
+    const sunset = new Date(ss);
+    if (Number.isNaN(sunrise.getTime()) || Number.isNaN(sunset.getTime())) {
+      throw new Error("date solare invalide");
+    }
+    sim.setSunTimes(sunrise, sunset, "Open-Meteo");
+    console.log(`  Iluminat: ceas astronomic real (Open-Meteo) — răsărit ${sr}, apus ${ss}.`);
+  } catch (err) {
+    console.error("  ! Date solare indisponibile (rămâne orarul fix 19–07):", err.message);
+  }
+}
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -266,9 +387,18 @@ try {
 
 startHeartbeat();
 
+// preia datele de parcare imediat, apoi periodic
+pollParking();
+setInterval(pollParking, PARK_POLL_MS);
+
+// preia orele solare imediat, apoi periodic (se schimbă lent)
+pollSunTimes();
+setInterval(pollSunTimes, SUN_POLL_MS);
+
 server.listen(PORT, () => {
   console.log(`\n  Smart City backend running`);
   console.log(`  REST:      http://localhost:${PORT}/api/devices`);
   console.log(`  WebSocket: ws://localhost:${PORT}`);
-  console.log(`  Simulating ${sim.devices.length} devices across 5 modules.\n`);
+  console.log(`  Simulating ${sim.devices.length} devices across 5 modules.`);
+  console.log(`  Parcări live din: ${PARK_URL}\n`);
 });
