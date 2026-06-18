@@ -7,3 +7,5 @@ dist/
 .venv/
 __pycache__/
 *.pyc
+# Cache local GTFS (transport public) - se regenereaza din Tranzy
+transit-static-cache.json

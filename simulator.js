@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 //  simulator.js  —  "the living city"
-//  One simulator that feeds all 5 modules. No real hardware needed.
+//  One simulator that feeds the static modules and dynamic external modules.
 //  Each device has: id, module, name, lat, lng, status, metrics{...}
 //  Every tick we update metrics (random walk) and occasionally flip status.
 // ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ export function statusFromAqi(value) {
   return "error";
 }
 
-// ---- device definitions (5 modules) --------------------------------------
+// ---- device definitions (modulele statice) --------------------------------
 function buildDevices() {
   const devices = [];
 
@@ -45,62 +45,12 @@ function buildDevices() {
     })
   );
 
-  // 2) ENVIRONMENT — stații de calitate a aerului (toate stațiile WAQI din Cluj)
-  // [uid WAQI, nume]. id-ul dispozitivului = ENV-<uid>, exact cheia trimisă de podul
-  // aqi_bridge.py, așa că valorile REALE și coordonatele corecte le actualizează pe loc
-  // când podul are conexiune. Coordonatele de start sunt distribuite în jurul centrului
-  // (placeholder) până la prima măsurare reală. Stații noi se adaugă automat (ensureEnvDevice).
-  const envStations = [
-    ["479848", "Sânnicoară"],
-    ["472192", "Cluj Napoca 2"],
-    ["471601", "Cluj Napoca"],
-    ["502057", "Bd. 21 Decembrie 1989"],
-    ["484903", "Strada Câmpului"],
-    ["523171", "Strada Fântânele"],
-    ["205393", "Calea Turzii"],
-    ["598894", "Strada 1 Mai"],
-    ["235588", "Strada Bună Ziua"],
-    ["532648", "Aleea Bâlea"],
-    ["527899", "Strada George Barițiu"],
-    ["760486", "Strada Constructorilor"],
-    ["233335", "Aleea Budai Nagy Antal"],
-    ["193945", "Antonio Gaudi S1"],
-    ["527887", "Strada George Coșbuc"],
-    ["532642", "Strada Aviator Bădescu"],
-    ["177814", "Strada Antonio Gaudi"],
-    ["518284", "Strada Bună Ziua (2)"],
-    ["244603", "Strada Regele Ferdinand"],
-    ["205399", "Strada Frunzișului"],
-  ];
-  envStations.forEach(([uid, name], i) => {
-    // distribuie pe inele concentrice ca să nu se suprapună pe hartă
-    const ang = (i / envStations.length) * Math.PI * 2;
-    const r = 0.010 + (i % 3) * 0.006;
-    devices.push({
-      id: `ENV-${uid}`,
-      module: "environment",
-      name,
-      stationId: uid,
-      lat: CENTER.lat + Math.sin(ang) * r,
-      lng: CENTER.lng + Math.cos(ang) * r,
-      status: "ok",
-      source: "simulated",
-      provider: "Simulator local",
-      external: false,
-      externalUntil: 0,
-      observedAt: null,
-      cityUrl: `https://aqicn.org/station/@${uid}/ro/`,
-      attributions: [],
-      metrics: {
-        aqi: rnd(20, 60) | 0,
-        pm25: rnd(15, 50) | 0,
-        pm10: rnd(10, 45) | 0,
-        no2: rnd(8, 40) | 0,
-        temp: +rnd(6, 18).toFixed(1),
-        humidity: rnd(50, 80) | 0,
-      },
-    });
-  });
+  // 2) ENVIRONMENT — DOAR stații LIVE, fără puncte simulate.
+  // Nu mai pre-populăm stații „placeholder" simulate. Stațiile de mediu apar
+  // dinamic numai când sosesc date reale:
+  //   • podul WAQI (aqi_bridge.py)  -> ensureEnvDevice("ENV-<uid>")
+  //   • poller-ul uRADMonitor (server.js) -> ensureEnvDevice("ENV-URAD-<id>")
+  // Astfel, harta de mediu conține exclusiv senzori cu măsurători reale.
 
 
   // 3) ENERGY — corpuri de iluminat inteligent (model tip CMS / LoRaWAN)
@@ -128,6 +78,8 @@ function buildDevices() {
   // CAM-03 folosește webcam-ul live din Piața Avram Iancu (YouTube, webcamromania.ro).
   const cams = [
     ["CAM-03", "Piața Avram Iancu", near(0.001, 0.003), "https://www.youtube.com/embed/EfAO0iXOeiE"],
+    // CAM-04: webcam live YouTube (WC3CkcTYCYY) — Planetarium Café, lângă Piața Unirii.
+    ["CAM-04", "Planetarium Café", { lat: 46.768854, lng: 23.589230 }, "https://www.youtube.com/embed/WC3CkcTYCYY"],
   ];
   cams.forEach(([id, name, c, streamUrl]) =>
     devices.push({
@@ -174,52 +126,27 @@ export function createSimulator() {
   // Configurare partajată: orele reale de apus/răsărit (Open-Meteo) pentru iluminat.
   const config = { sun: null, sunProvider: null };
 
-// Reactiveaza simularea cand datele WAQI au expirat
-function restoreEnvironmentFallback(d) {
-  d.external = false;
-  d.externalUntil = 0;
-  d.source = "simulated";
-  d.provider = "Simulator local";
-  d.observedAt = null;
-  d.updatedAt = null;
-  d.cityUrl = null;
-  d.attributions = [];
-
-  if (!Number.isFinite(Number(d.metrics.aqi))) {
-    d.metrics.aqi = rnd(20, 55) | 0;
-  }
-
-  if (!Number.isFinite(Number(d.metrics.pm25))) {
-    d.metrics.pm25 = rnd(15, 50) | 0;
-  }
-
-  if (!Number.isFinite(Number(d.metrics.pm10))) {
-    d.metrics.pm10 = rnd(10, 45) | 0;
-  }
-
-  if (!Number.isFinite(Number(d.metrics.no2))) {
-    d.metrics.no2 = rnd(8, 40) | 0;
-  }
-
-  if (!Number.isFinite(Number(d.metrics.temp))) {
-    d.metrics.temp = +rnd(6, 18).toFixed(1);
-  }
-
-  if (!Number.isFinite(Number(d.metrics.humidity))) {
-    d.metrics.humidity = rnd(50, 80) | 0;
-  }
-
-  delete d.metrics.o3;
-  delete d.metrics.co;
-  delete d.metrics.so2;
-  delete d.metrics.pressure;
-  delete d.metrics.wind;
-  delete d.metrics.dominantPollutant;
-}
-
   function tickDevice(d) {
+    // Mediu: EXCLUSIV date LIVE — nu se simulează niciodată.
+    // Înregistrăm istoricul valorilor reale primite; după expirarea TTL marcăm
+    // stația ca „date învechite" (stale), dar NU generăm valori aleatorii.
+    if (d.module === "environment") {
+      const hasTtl = Number(d.externalUntil || 0) > 0;
+      d.stale = hasTtl && Date.now() > Number(d.externalUntil);
+      if (d.stale && d.status !== "unknown") d.status = "unknown";
+
+      const h0 = history[d.id];
+      h0.push({
+        t: new Date().toLocaleTimeString("ro-RO"),
+        ...JSON.parse(JSON.stringify(d.metrics)),
+      });
+      if (h0.length > 30) h0.shift();
+
+      return;
+    }
+
     // Traficul extern SUMO ramane neschimbat
-    if (d.external && d.module !== "environment") {
+    if (d.external) {
       const h0 = history[d.id];
 
       h0.push({
@@ -232,23 +159,6 @@ function restoreEnvironmentFallback(d) {
       return;
     }
 
-    // Datele WAQI expira si revin automat la simulare
-    if (d.external && d.module === "environment") {
-      if (Date.now() <= Number(d.externalUntil || 0)) {
-        const h0 = history[d.id];
-
-        h0.push({
-          t: new Date().toLocaleTimeString("ro-RO"),
-          ...JSON.parse(JSON.stringify(d.metrics)),
-        });
-
-        if (h0.length > 30) h0.shift();
-
-        return;
-      }
-
-  restoreEnvironmentFallback(d);
-}
     const m = d.metrics;
     switch (d.module) {
       case "traffic":
@@ -256,25 +166,6 @@ function restoreEnvironmentFallback(d) {
         m.out = clamp(m.out + rnd(-15, 15), 0, 200) | 0;
         m.speed = clamp(m.speed + rnd(-4, 4), 5, 70) | 0;
         m.occupancy = clamp(m.occupancy + rnd(-8, 8), 0, 100) | 0;
-        break;
-      // Simulare de rezerva pentru modulul de mediu
-      case "environment":
-        m.aqi = clamp(m.aqi + rnd(-4, 4), 0, 200) | 0;
-        m.pm25 = clamp(m.pm25 + rnd(-3, 3), 0, 200) | 0;
-        m.pm10 = clamp(m.pm10 + rnd(-4, 4), 0, 200) | 0;
-        m.no2 = clamp(m.no2 + rnd(-3, 3), 0, 200) | 0;
-        m.temp = +clamp(
-          m.temp + rnd(-0.4, 0.4),
-          -20,
-          45,
-        ).toFixed(1);
-        m.humidity = clamp(
-          m.humidity + rnd(-2, 2),
-          20,
-          100,
-        ) | 0;
-
-        d.status = statusFromAqi(m.aqi);
         break;
       case "lighting": {
         const now = new Date();
@@ -379,6 +270,34 @@ function restoreEnvironmentFallback(d) {
       config.sunProvider = provider || "Open-Meteo";
     },
     getConfig: () => config,
+    // Sincronizează inventarul din Open Charge Map. Locațiile EV sunt dinamice:
+    // se adaugă, se actualizează și se elimină după fiecare răspuns API valid.
+    syncChargingDevices: (incoming) => {
+      const list = Array.isArray(incoming) ? incoming : [];
+      const currentIds = new Set(list.map((item) => item.id));
+
+      list.forEach((item) => {
+        let device = devices.find((d) => d.id === item.id);
+
+        if (!device) {
+          device = { ...item, metrics: { ...(item.metrics || {}) } };
+          devices.push(device);
+          history[item.id] = [];
+          return;
+        }
+
+        Object.assign(device, item);
+        device.metrics = { ...(item.metrics || {}) };
+      });
+
+      for (let index = devices.length - 1; index >= 0; index -= 1) {
+        const device = devices[index];
+        if (device.module === "charging" && !currentIds.has(device.id)) {
+          devices.splice(index, 1);
+          delete history[device.id];
+        }
+      }
+    },
     // Creează (dacă lipsește) un dispozitiv de mediu pentru o stație WAQI descoperită
     // dinamic de pod. Inițializează și istoricul, ca tick-ul să nu eșueze.
     ensureEnvDevice: (id) => {
@@ -406,7 +325,34 @@ function restoreEnvironmentFallback(d) {
       history[id] = [];
       return device;
     },
-    // Creează (dacă lipsește) un vehicul de transport public (CTP/Tranzy).
+    // Sincronizeaza vehiculele CTP din Tranzy si elimina vehiculele disparute din feed.
+    syncTransitDevices: (incoming) => {
+      const list = Array.isArray(incoming) ? incoming : [];
+      const currentIds = new Set(list.map((item) => item.id));
+
+      list.forEach((item) => {
+        let device = devices.find((d) => d.id === item.id);
+
+        if (!device) {
+          device = { ...item, metrics: { ...(item.metrics || {}) } };
+          devices.push(device);
+          history[item.id] = [];
+          return;
+        }
+
+        Object.assign(device, item);
+        device.metrics = { ...(item.metrics || {}) };
+      });
+
+      for (let index = devices.length - 1; index >= 0; index -= 1) {
+        const device = devices[index];
+        if (device.module === "transit" && !currentIds.has(device.id)) {
+          devices.splice(index, 1);
+          delete history[device.id];
+        }
+      }
+    },
+    // Creeaza (daca lipseste) un vehicul de transport public (CTP/Tranzy).
     ensureTransitDevice: (id) => {
       let device = devices.find((d) => d.id === id);
       if (device) return device;

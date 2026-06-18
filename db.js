@@ -56,6 +56,31 @@ export async function initDb(devices) {
 // salvează starea curentă a tuturor dispozitivelor într-un singur INSERT (eficient)
 export async function saveReadings(devices) {
   if (!devices.length) return;
+
+  // 1) Auto-înregistrare: ne asigurăm că fiecare dispozitiv există în tabela
+  //    `devices` ÎNAINTE de a-i scrie citirile. Fără acest pas, un dispozitiv
+  //    adăugat după pornire (ex. o cameră nouă) ar lipsi din tabelă, iar
+  //    constrângerea FK ar respinge ÎNTREGUL batch de citiri (eroarea
+  //    readings_device_id_fkey).
+  const devRows = [];
+  const devParams = [];
+  devices.forEach((d, i) => {
+    const a = i * 5;
+    const lng = Number.isFinite(Number(d.lng)) ? Number(d.lng) : null;
+    const lat = Number.isFinite(Number(d.lat)) ? Number(d.lat) : null;
+    devRows.push(
+      `($${a + 1}, $${a + 2}, $${a + 3}, ST_SetSRID(ST_MakePoint($${a + 4}, $${a + 5}), 4326))`
+    );
+    devParams.push(d.id, d.module, d.name, lng, lat);
+  });
+  await pool.query(
+    `INSERT INTO devices (id, module, name, geom) VALUES ${devRows.join(",")}
+     ON CONFLICT (id) DO UPDATE
+       SET module = EXCLUDED.module, name = EXCLUDED.name, geom = EXCLUDED.geom`,
+    devParams
+  );
+
+  // 2) Inserăm citirile (acum toate device_id-urile există în `devices`).
   const rows = [];
   const params = [];
   devices.forEach((d, i) => {
